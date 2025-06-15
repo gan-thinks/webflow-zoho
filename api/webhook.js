@@ -1,5 +1,4 @@
-// api/webhook.js - Vercel Function to handle Webflow form submissions  test
-const axios = require('axios');
+// api/webhook.js - Fixed for Vercel (ES Modules)
 
 // Zoho API Configuration
 const ZOHO_CONFIG = {
@@ -25,19 +24,26 @@ async function getAccessToken() {
   }
 
   try {
-    const response = await axios.post('https://accounts.zoho.com/oauth/v2/token', null, {
-      params: {
+    const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
         refresh_token: ZOHO_CONFIG.refreshToken,
         client_id: ZOHO_CONFIG.clientId,
         client_secret: ZOHO_CONFIG.clientSecret,
         grant_type: 'refresh_token'
-      },
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
+      })
     });
 
-    const { access_token, expires_in } = response.data;
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`Token request failed: ${data.error || 'Unknown error'}`);
+    }
+
+    const { access_token, expires_in } = data;
     
     // Cache the token
     accessTokenCache.token = access_token;
@@ -45,7 +51,7 @@ async function getAccessToken() {
     
     return access_token;
   } catch (error) {
-    console.error('Error getting access token:', error.response?.data || error.message);
+    console.error('Error getting access token:', error.message);
     throw new Error('Failed to authenticate with Zoho');
   }
 }
@@ -57,22 +63,26 @@ async function createZohoLead(leadData) {
   try {
     const accessToken = await getAccessToken();
     
-    const response = await axios.post(
-      `${ZOHO_CONFIG.domain}/crm/v2/Leads`,
-      {
-        data: [leadData]
+    const response = await fetch(`${ZOHO_CONFIG.domain}/crm/v2/Leads`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`,
+        'Content-Type': 'application/json'
       },
-      {
-        headers: {
-          'Authorization': `Zoho-oauthtoken ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+      body: JSON.stringify({
+        data: [leadData]
+      })
+    });
 
-    return response.data;
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`CRM request failed: ${data.message || 'Unknown error'}`);
+    }
+
+    return data;
   } catch (error) {
-    console.error('Error creating Zoho lead:', error.response?.data || error.message);
+    console.error('Error creating Zoho lead:', error.message);
     throw new Error('Failed to create lead in Zoho CRM');
   }
 }
@@ -81,9 +91,13 @@ async function createZohoLead(leadData) {
  * Map Webflow form data to Zoho lead format
  */
 function mapFormDataToZohoLead(formData, formType) {
+  const nameParts = (formData.name || 'Unknown User').split(' ');
+  const firstName = nameParts[0];
+  const lastName = nameParts.slice(1).join(' ') || 'User';
+
   const baseData = {
-    First_Name: formData.name?.split(' ')[0] || 'Unknown',
-    Last_Name: formData.name?.split(' ').slice(1).join(' ') || 'User',
+    First_Name: firstName,
+    Last_Name: lastName,
     Email: formData.email,
     Phone: formData.phone || null,
     Company: formData.company || null,
@@ -129,29 +143,6 @@ function parseFormData(body) {
 }
 
 /**
- * Send success response with CORS headers
- */
-function sendSuccessResponse(res, message = 'Form submitted successfully') {
-  return res.status(200).json({
-    success: true,
-    message: message,
-    timestamp: new Date().toISOString()
-  });
-}
-
-/**
- * Send error response with CORS headers
- */
-function sendErrorResponse(res, error, statusCode = 500) {
-  console.error('Error:', error);
-  return res.status(statusCode).json({
-    success: false,
-    error: error.message || 'An error occurred',
-    timestamp: new Date().toISOString()
-  });
-}
-
-/**
  * Add CORS headers to response
  */
 function addCORSHeaders(res) {
@@ -184,7 +175,7 @@ function validateFormData(formData) {
 }
 
 /**
- * Main webhook handler
+ * Main webhook handler - FIXED FOR VERCEL
  */
 export default async function handler(req, res) {
   // Add CORS headers to all responses
@@ -197,7 +188,11 @@ export default async function handler(req, res) {
   
   // Only accept POST requests
   if (req.method !== 'POST') {
-    return sendErrorResponse(res, new Error('Method not allowed'), 405);
+    return res.status(405).json({
+      success: false,
+      error: 'Method not allowed',
+      timestamp: new Date().toISOString()
+    });
   }
   
   try {
@@ -208,7 +203,11 @@ export default async function handler(req, res) {
     // Validate form data
     const validationErrors = validateFormData(formData);
     if (validationErrors.length > 0) {
-      return sendErrorResponse(res, new Error(`Validation failed: ${validationErrors.join(', ')}`), 400);
+      return res.status(400).json({
+        success: false,
+        error: `Validation failed: ${validationErrors.join(', ')}`,
+        timestamp: new Date().toISOString()
+      });
     }
     
     // Determine form type
@@ -224,12 +223,22 @@ export default async function handler(req, res) {
     
     // Check if lead was created successfully
     if (zohoResponse.data && zohoResponse.data[0] && zohoResponse.data[0].status === 'success') {
-      return sendSuccessResponse(res, 'Lead created successfully in Zoho CRM');
+      return res.status(200).json({
+        success: true,
+        message: 'Lead created successfully in Zoho CRM',
+        leadId: zohoResponse.data[0].details.id,
+        timestamp: new Date().toISOString()
+      });
     } else {
       throw new Error('Failed to create lead in Zoho CRM');
     }
     
   } catch (error) {
-    return sendErrorResponse(res, error);
+    console.error('Webhook error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'An error occurred',
+      timestamp: new Date().toISOString()
+    });
   }
 }
